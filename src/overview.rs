@@ -26,11 +26,14 @@ use crate::ws::{self, Miss};
 
 const CLASS: PCWSTR = w!("pdesk-overview");
 const CLOSE_CLASS: PCWSTR = w!("pdesk-overview-close");
+const GHOST_CLASS: PCWSTR = w!("pdesk-overview-ghost");
 const TILE_BG: COLORREF = COLORREF(0x0034_3434); // the finder's line grey
 const CLOSING_TIMER: usize = 1;
 const CLOSING_POLL_MS: u32 = 200; // as the finder's
 const NOTE_TIMER: usize = 2;
 const NOTE_MS: u32 = 2000;
+const REFRESH_TIMER: usize = 3;
+const REFRESH_MS: u32 = 250;
 const KEY_W: VIRTUAL_KEY = VIRTUAL_KEY(b'W' as u16);
 
 // Sizes at 96 dpi, from the spec's layout.
@@ -49,6 +52,7 @@ const CARD_ICON: f32 = 32.0;
 const CARD_PAD: f32 = 8.0;
 const CLOSE_BTN: f32 = 24.0;
 const CLOSE_INSET: f32 = 6.0; // from the hovered window's top right corner
+const GHOST_W: f32 = 240.0;
 
 /// A live preview drawn by DWM into a popup; unregistered when dropped.
 struct Thumb(isize);
@@ -150,9 +154,16 @@ impl Screen {
         let Some(i) = self.tiles.iter().position(|t| inside(&t.rect)) else { return Hit::Background };
         // Front to back, so the window on top takes the click.
         match self.tiles[i].minis.iter().rev().find(|m| inside(&m.rect)) {
-            Some(m) => Hit::Mini(m.hwnd),
+            Some(m) => Hit::Mini(i, m.hwnd),
             None => Hit::Tile(i),
         }
+    }
+
+    /// The workspace a drop at `pt` lands on: a tile's, else the shown one when it is in the
+    /// spread. None anywhere else, which cancels the drop.
+    fn drop_target(&self, pt: POINT) -> Option<usize> {
+        let inside = |r: &RECT| pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom;
+        self.tiles.iter().position(|t| inside(&t.rect)).or_else(|| inside(&self.spread_area()).then_some(self.shown))
     }
 
     /// The top left spread window, where a selection starts.
@@ -188,9 +199,40 @@ impl Drop for Screen {
 
 enum Hit {
     Slot(HWND),
-    Mini(HWND),
+    Mini(usize, HWND), // (tile, window)
     Tile(usize),
     Background,
+}
+
+/// The small live preview under the mouse during a drag (AC-7); its own popup, above every
+/// screen's overview. Taken down when dropped.
+struct Ghost {
+    hwnd: HWND,
+    size: (i32, i32),
+    thumb: Option<Thumb>, // none: a plain card
+}
+
+impl Drop for Ghost {
+    fn drop(&mut self) {
+        self.thumb = None; // before the popup it draws into
+        unsafe { let _ = DestroyWindow(self.hwnd); }
+    }
+}
+
+enum Stage {
+    Pressed,        // not yet past the drag distance: still a click
+    Moving(Ghost),
+    Cancelled,      // Esc or a right click: the release does nothing
+}
+
+/// A press on a window, from its press to the button's release. The pressed popup holds the
+/// mouse capture throughout, so the drag can cross screens.
+struct Drag {
+    hwnd: HWND,
+    from: (String, usize), // where it lives: screen and workspace
+    start: POINT,          // screen coordinates
+    scale: f32,            // the pressed screen's, for the ghost's size
+    stage: Stage,
 }
 
 struct Session {
@@ -199,6 +241,31 @@ struct Session {
     hover: Option<(HWND, HWND)>, // (popup, window) of the spread window under the mouse
     selected: (usize, Option<HWND>), // (screen, spread window); no window when its spread is empty
     closing: Vec<(HWND, String)>, // sent WM_CLOSE, waiting to go; titles for the log
+    drag: Option<Drag>,
+    seen: Vec<Seen>, // the list the layout was built from, for the refresh
+}
+
+/// A listed window and where it lives, as the refresh compares them.
+type Seen = (HWND, String, usize, bool);
+
+fn seen(places: &[ws::Place]) -> Vec<Seen> {
+    places.iter().map(|p| (p.hwnd, p.device.clone(), p.workspace, p.on_screen)).collect()
+}
+
+#[derive(Debug, PartialEq)]
+enum Refresh {
+    Nothing,
+    Rebuild,        // live: something opened, went or moved
+    Drop(Vec<HWND>), // not live: these went, the rest stay put
+}
+
+/// What a refresh does with the list `now`, given the one the layout came from (AC-10).
+fn refresh_plan(live: bool, seen: &[Seen], now: &[Seen]) -> Refresh {
+    if live {
+        return if seen == now { Refresh::Nothing } else { Refresh::Rebuild };
+    }
+    let gone: Vec<HWND> = seen.iter().map(|s| s.0).filter(|h| !now.iter().any(|n| n.0 == *h)).collect();
+    if gone.is_empty() { Refresh::Nothing } else { Refresh::Drop(gone) }
 }
 
 impl Session {
@@ -414,6 +481,9 @@ fn popup(r: RECT) -> Option<HWND> {
             let cursor = LoadCursorW(None, IDC_ARROW).ok()?;
             RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: inst.into(), lpszClassName: CLASS, hCursor: cursor, ..Default::default() });
             RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(close_wndproc), hInstance: inst.into(), lpszClassName: CLOSE_CLASS, hCursor: cursor, ..Default::default() });
+            // The class brush lives as long as pdesk; it is what a card ghost shows.
+            let card = CreateSolidBrush(TILE_BG);
+            RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(ghost_wndproc), hInstance: inst.into(), lpszClassName: GHOST_CLASS, hCursor: cursor, hbrBackground: card, ..Default::default() });
             REGISTERED.set(true);
         }
         // Tool window: never in Alt+Tab or the taskbar, and never in ws lists. One of them
@@ -434,6 +504,25 @@ fn close_button(owner: HWND, scale: f32) -> Option<HWND> {
         let _ = SetWindowRgn(h, Some(CreateEllipticRgn(0, 0, d + 1, d + 1)), false);
         Some(h)
     }
+}
+
+/// The drag ghost for `src`: 240 px wide at `scale`, the window's aspect, not shown yet.
+fn ghost(src: HWND, scale: f32) -> Option<Ghost> {
+    let real = ws::real_rect(src);
+    let w = (GHOST_W * scale).round() as i32;
+    let h = ((w as i64 * (real.bottom - real.top).max(1) as i64) / (real.right - real.left).max(1) as i64) as i32;
+    let hwnd = unsafe {
+        let inst = GetModuleHandleW(None).ok()?;
+        CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, GHOST_CLASS, w!("pdesk overview drag"), WS_POPUP, 0, 0, w, h, None, None, Some(inst.into()), None).ok()?
+    };
+    let full = RECT { left: 0, top: 0, right: w, bottom: h };
+    Some(Ghost { hwnd, size: (w, h), thumb: thumb(hwnd, src, full, full) })
+}
+
+fn cursor() -> POINT {
+    let mut pt = POINT::default();
+    unsafe { let _ = GetCursorPos(&mut pt); }
+    pt
 }
 
 /// Win+Tab: open on every screen, or close if open.
@@ -480,11 +569,13 @@ fn open() {
     let selected = (start, sc.slots.iter().any(|s| s.hwnd == came_from).then_some(came_from).or_else(|| sc.first()));
     let windows: usize = screens.iter().map(|s| s.slots.len()).sum();
     let popups: Vec<HWND> = screens.iter().map(|s| s.popup).collect();
-    SESSION.set(Some(Session { screens, came_from, hover: None, selected, closing: Vec::new() }));
+    SESSION.set(Some(Session { screens, came_from, hover: None, selected, closing: Vec::new(), drag: None, seen: seen(&places) }));
     unsafe {
         for &p in &popups {
             let _ = SetWindowPos(p, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
+        // One timer for every screen; it goes with its popup on close.
+        SetTimer(Some(focus), REFRESH_TIMER, REFRESH_MS, None);
         let _ = SetForegroundWindow(focus);
         if GetForegroundWindow() != focus {
             close(false);
@@ -520,7 +611,8 @@ pub fn key(msg: &MSG) -> bool {
     let selection = || SESSION.with_borrow(|s| s.as_ref().and_then(Session::selection));
     let vk = VIRTUAL_KEY(msg.wParam.0 as u16);
     match vk {
-        VK_ESCAPE => close(true),
+        VK_ESCAPE if !cancel_drag() => close(true),
+        VK_ESCAPE => {}
         VK_LEFT => arrow((-1, 0)),
         VK_RIGHT => arrow((1, 0)),
         VK_UP => arrow((0, -1)),
@@ -613,19 +705,47 @@ fn go(hwnd: HWND) {
         }
         Err(Miss::Gone | Miss::CantMove) => {
             println!("overview: a window is gone");
-            let places = ws::windows();
-            // Every screen: it may sit in a tile on one and in the spread on another.
-            let (popups, old) = SESSION.with_borrow_mut(|s| {
-                let Some(s) = s.as_mut() else { return (Vec::new(), None) };
-                for sc in &mut s.screens {
-                    sc.build(&places);
-                }
-                s.fix_selection();
-                (s.screens.iter().map(|sc| sc.popup).collect(), s.hover.take())
-            });
-            hover_changed(old);
-            invalidate(popups);
+            rebuild();
         }
+    }
+}
+
+/// Every screen laid out again from the current window list, after windows moved or went:
+/// one may sit in a tile on one screen and in the spread on another.
+fn rebuild() {
+    let places = ws::windows();
+    let (popups, old) = SESSION.with_borrow_mut(|s| {
+        let Some(s) = s.as_mut() else { return (Vec::new(), None) };
+        for sc in &mut s.screens {
+            sc.build(&places);
+        }
+        s.seen = seen(&places);
+        s.fix_selection();
+        (s.screens.iter().map(|sc| sc.popup).collect(), s.hover.take())
+    });
+    hover_changed(old);
+    invalidate(popups);
+}
+
+/// Every 250 ms: catch windows that opened, went or moved since the layout was made (AC-10).
+/// Skipped mid drag, so the spread never shifts under a press.
+fn refresh() {
+    if SESSION.with_borrow(|s| s.as_ref().is_none_or(|s| s.drag.is_some())) {
+        return;
+    }
+    let now = seen(&ws::windows());
+    let plan = SESSION.with_borrow_mut(|s| {
+        let s = s.as_mut()?;
+        let plan = refresh_plan(settings::get().overview_live, &s.seen, &now);
+        if let Refresh::Drop(gone) = &plan {
+            s.seen.retain(|x| !gone.contains(&x.0));
+        }
+        Some(plan)
+    });
+    match plan {
+        Some(Refresh::Rebuild) => rebuild(),
+        Some(Refresh::Drop(gone)) => drop_gone(&gone),
+        Some(Refresh::Nothing) | None => {}
     }
 }
 
@@ -731,7 +851,7 @@ fn on_click(popup: HWND, pt: POINT) {
         Some((sc.device.clone(), sc.shown, sc.hit(pt)))
     });
     match hit {
-        Some((_, _, Hit::Slot(h) | Hit::Mini(h))) => go(h),
+        Some((_, _, Hit::Slot(h) | Hit::Mini(_, h))) => go(h),
         Some((device, shown, Hit::Tile(i))) => show(&device, shown, i),
         Some((.., Hit::Background)) => close(true),
         None => {}
@@ -739,9 +859,132 @@ fn on_click(popup: HWND, pt: POINT) {
 }
 
 fn on_middle_click(popup: HWND, pt: POINT) {
-    let hit = SESSION.with_borrow(|s| s.as_ref()?.screens.iter().find(|sc| sc.popup == popup).map(|sc| sc.hit(pt)));
+    // During a drag the point is relative to the pressed popup, whichever screen it is on.
+    let hit = SESSION.with_borrow(|s| s.as_ref().filter(|s| s.drag.is_none())?.screens.iter().find(|sc| sc.popup == popup).map(|sc| sc.hit(pt)));
     if let Some(Hit::Slot(h)) = hit {
         close_window(popup, h);
+    }
+}
+
+/// A press on a window may become a drag: the popup takes the mouse capture, so the moves
+/// and the release come back to it from any screen.
+fn on_press(popup: HWND, pt: POINT) {
+    let start = cursor();
+    let started = SESSION.with_borrow_mut(|s| {
+        let s = s.as_mut()?;
+        let sc = s.screens.iter().find(|sc| sc.popup == popup)?;
+        let (hwnd, ws) = match sc.hit(pt) {
+            Hit::Slot(h) => (h, sc.shown),
+            Hit::Mini(i, h) => (h, i),
+            _ => return None,
+        };
+        s.drag = Some(Drag { hwnd, from: (sc.device.clone(), ws), start, scale: sc.scale, stage: Stage::Pressed });
+        Some(())
+    });
+    if started.is_some() {
+        unsafe { SetCapture(popup) };
+    }
+}
+
+/// A move with a window pressed: past the drag distance the ghost appears, then follows the
+/// mouse. False when nothing is pressed, so the move is an ordinary one.
+fn drag_move() -> bool {
+    let pt = cursor();
+    let pressed = SESSION.with_borrow(|s| {
+        let d = s.as_ref()?.drag.as_ref()?;
+        let ghost = match &d.stage {
+            Stage::Pressed => None,
+            Stage::Moving(g) => Some((g.hwnd, g.size)),
+            Stage::Cancelled => return Some(None),
+        };
+        Some(Some((d.hwnd, d.start, d.scale, ghost)))
+    });
+    let Some(pressed) = pressed else { return false };
+    // Cancelled: nothing moves until the release.
+    let Some((hwnd, start, scale, moving)) = pressed else { return true };
+    let (ghost_hwnd, (w, h)) = match moving {
+        Some(g) => g,
+        None => {
+            let (cx, cy) = unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+            if (pt.x - start.x).abs() <= cx && (pt.y - start.y).abs() <= cy {
+                return true;
+            }
+            let Some(g) = ghost(hwnd, scale) else {
+                eprintln!("overview: drag preview for \"{}\" not created", ws::title(hwnd));
+                return true;
+            };
+            let made = (g.hwnd, g.size);
+            // The X would sit on a window that is now moving.
+            let old = SESSION.with_borrow_mut(|s| {
+                let s = s.as_mut()?;
+                s.drag.as_mut()?.stage = Stage::Moving(g);
+                s.hover.take()
+            });
+            hover_changed(old);
+            made
+        }
+    };
+    unsafe { let _ = SetWindowPos(ghost_hwnd, Some(HWND_TOPMOST), pt.x - w / 2, pt.y - h / 2, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW); }
+    true
+}
+
+/// The release: a drop after a drag, a click otherwise, nothing after a cancel.
+fn on_release(popup: HWND, pt: POINT) {
+    let drag = SESSION.with_borrow_mut(|s| s.as_mut()?.drag.take());
+    // After the take, so the capture change finds no drag to cancel.
+    unsafe { let _ = ReleaseCapture(); }
+    match drag {
+        Some(Drag { stage: Stage::Cancelled, .. }) => {}
+        Some(d @ Drag { stage: Stage::Moving(_), .. }) => drop_at(d),
+        _ => on_click(popup, pt),
+    }
+}
+
+/// Esc or a right click during a drag: the ghost goes, and the release does nothing. False
+/// when no drag is under way, so Esc closes the overview as usual.
+fn cancel_drag() -> bool {
+    let old = SESSION.with_borrow_mut(|s| {
+        let d = s.as_mut()?.drag.as_mut()?;
+        matches!(d.stage, Stage::Moving(_)).then(|| std::mem::replace(&mut d.stage, Stage::Cancelled))
+    });
+    // The ghost goes here, outside the borrow.
+    old.is_some()
+}
+
+/// Move the dragged window to the workspace under the mouse, on any screen. Its own place,
+/// or anywhere that is neither a tile nor a spread, changes nothing.
+fn drop_at(d: Drag) {
+    let pt = cursor();
+    let target = SESSION.with_borrow(|s| {
+        s.as_ref()?.screens.iter().find_map(|sc| {
+            let r = sc.rect;
+            let on = pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom;
+            on.then(|| (sc.popup, sc.device.clone(), sc.drop_target(POINT { x: pt.x - r.left, y: pt.y - r.top })))
+        })
+    });
+    let (hwnd, from) = (d.hwnd, d.from.clone());
+    drop(d); // the ghost goes before the window moves
+    let Some((popup, device, Some(to))) = target else { return };
+    if (device.as_str(), to) == (from.0.as_str(), from.1) {
+        return;
+    }
+    match ws::place(hwnd, &device, to) {
+        Ok(()) => {
+            // Hidden now: Esc must not hand focus to a window you can't see.
+            if to != ws::active(&device) {
+                SESSION.with_borrow_mut(|s| {
+                    if let Some(s) = s.as_mut().filter(|s| s.came_from == hwnd) {
+                        s.came_from = HWND::default();
+                    }
+                });
+            }
+            rebuild();
+        }
+        Err(Miss::Gone) => {
+            println!("overview: a window is gone");
+            rebuild();
+        }
+        Err(Miss::CantMove) => note(popup, "Can't move this window"),
     }
 }
 
@@ -943,8 +1186,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 close(false);
                 LRESULT(0)
             }
+            WM_LBUTTONDOWN => {
+                on_press(hwnd, POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: (lp.0 >> 16) as i16 as i32 });
+                LRESULT(0)
+            }
             WM_LBUTTONUP => {
-                on_click(hwnd, POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: (lp.0 >> 16) as i16 as i32 });
+                on_release(hwnd, POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: (lp.0 >> 16) as i16 as i32 });
+                LRESULT(0)
+            }
+            WM_RBUTTONDOWN => {
+                cancel_drag();
+                LRESULT(0)
+            }
+            // Lost to another window mid press: the release goes there, so the press is over.
+            WM_CAPTURECHANGED => {
+                drop(SESSION.with_borrow_mut(|s| s.as_mut()?.drag.take()));
                 LRESULT(0)
             }
             WM_MBUTTONUP => {
@@ -952,7 +1208,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
-                on_move(hwnd, POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: (lp.0 >> 16) as i16 as i32 });
+                if !drag_move() {
+                    on_move(hwnd, POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: (lp.0 >> 16) as i16 as i32 });
+                }
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == CLOSING_TIMER => {
@@ -961,6 +1219,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_TIMER if wp.0 == NOTE_TIMER => {
                 note_gone(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == REFRESH_TIMER => {
+                refresh();
                 LRESULT(0)
             }
             WM_DPICHANGED => LRESULT(0), // each popup is sized for its own screen at open
@@ -999,6 +1261,15 @@ unsafe extern "system" fn close_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 on_close_click();
                 LRESULT(0)
             }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
+unsafe extern "system" fn ghost_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }
@@ -1113,6 +1384,40 @@ mod tests {
         assert_eq!(nearest(&rects, 3, (-1, 0)), Some(2));
         assert_eq!(nearest(&rects, 0, (-1, 0)), None);
         assert_eq!(nearest(&rects, 0, (0, -1)), None);
+    }
+
+    // AC-7: a drop lands where you let go: on a tile, that workspace; anywhere in the spread,
+    // the one the screen shows; on the margins nothing, so a missed drop never moves a window.
+    #[test]
+    fn a_drop_lands_on_the_tile_or_the_spread_under_the_mouse() {
+        let rect = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let tiles = strip(1920, 1080, 4, 1.0).into_iter().map(|rect| Tile { rect, minis: Vec::new() }).collect();
+        let sc = Screen { device: "D".into(), popup: HWND::default(), rect, scale: 1.0, font: HFONT::default(), shown: 2, tiles, slots: Vec::new(), close_btn: HWND::default(), note: None };
+        let mid = |r: RECT| POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+        assert_eq!(sc.drop_target(mid(sc.tiles[0].rect)), Some(0));
+        assert_eq!(sc.drop_target(mid(sc.tiles[3].rect)), Some(3));
+        assert_eq!(sc.drop_target(POINT { x: 960, y: 700 }), Some(2), "the spread means the shown workspace");
+        assert_eq!(sc.drop_target(POINT { x: 10, y: 700 }), None, "a side margin is neither");
+        assert_eq!(sc.drop_target(POINT { x: 10, y: 10 }), None);
+    }
+
+    // AC-10: live rebuilds only when the list really changed, since a rebuild registers every
+    // preview again and would blink four times a second; not live drops just what went and
+    // never reshuffles the rest, which is the whole point of turning live off.
+    #[test]
+    fn a_refresh_rebuilds_only_on_a_change_and_not_live_only_drops() {
+        let h = |n: usize| HWND(std::ptr::without_provenance_mut(n));
+        let w = |n: usize, ws: usize, on: bool| (h(n), "D".to_string(), ws, on);
+        let before = [w(1, 0, true), w(2, 1, false), w(3, 0, true)];
+        assert_eq!(refresh_plan(true, &before, &before), Refresh::Nothing);
+        let moved = [w(1, 0, true), w(2, 2, false), w(3, 0, true)];
+        assert_eq!(refresh_plan(true, &before, &moved), Refresh::Rebuild);
+        let opened = [w(4, 0, true), w(1, 0, true), w(2, 1, false), w(3, 0, true)];
+        assert_eq!(refresh_plan(true, &before, &opened), Refresh::Rebuild);
+        assert_eq!(refresh_plan(false, &before, &opened), Refresh::Nothing, "new windows wait for the next open");
+        assert_eq!(refresh_plan(false, &before, &moved), Refresh::Nothing, "the rest stay put");
+        let went = [w(4, 0, true), w(3, 0, true)];
+        assert_eq!(refresh_plan(false, &before, &went), Refresh::Drop(vec![h(1), h(2)]));
     }
 
     // AC-8: with no window you came from on that screen, the selection starts where you start

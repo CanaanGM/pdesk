@@ -605,6 +605,12 @@ pub fn go_to(hwnd: HWND) -> Result<(), Miss> {
 /// From another screen it keeps its relative place and size there. On failure nothing
 /// about the window or the state has changed (spec 0007).
 pub fn bring(hwnd: HWND, device: &str) -> Result<(), Miss> {
+    show_on(hwnd, device, true, "finder")
+}
+
+/// `bring`'s work. Without `activate` the window only comes to the front, restored, so the
+/// overview that dropped it keeps focus and stays open (spec 0010).
+fn show_on(hwnd: HWND, device: &str, activate: bool, who: &str) -> Result<(), Miss> {
     if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
         return Err(Miss::Gone);
     }
@@ -616,34 +622,109 @@ pub fn bring(hwnd: HWND, device: &str) -> Result<(), Miss> {
         Some((dev, _)) => dev.clone(),
         None => device_name(unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) }),
     };
+    let land = |h: HWND| if activate { focus(h) } else { raise(h) };
     if hidden.is_none() && from == device {
-        focus(hwnd);
+        land(hwnd);
         return Ok(());
     }
     let shell = Shell::new().map_err(|e| {
-        eprintln!("finder: shell unavailable: {e}");
+        eprintln!("{who}: shell unavailable: {e}");
         Miss::CantMove
     })?;
     if from != device {
         let (Some(old), Some(new)) = (monitor_named(&from), monitor_named(device)) else {
-            eprintln!("finder: {from} or {device} not found");
+            eprintln!("{who}: {from} or {device} not found");
             return Err(Miss::CantMove);
         };
         // Still cloaked if hidden, so it never flashes on its old screen.
         if let Err(e) = move_to(hwnd, old, new) {
-            eprintln!("finder: could not move \"{t}\": {e}");
+            eprintln!("{who}: could not move \"{t}\": {e}");
             return Err(Miss::CantMove);
         }
     }
     if let Some((dev, ws)) = &hidden {
         if let Err(e) = shell.hide(hwnd, false) {
-            eprintln!("finder: could not show \"{t}\": {e}");
+            eprintln!("{who}: could not show \"{t}\": {e}");
             return Err(Miss::CantMove);
         }
         s.monitors.get_mut(dev).expect("found above").hidden[*ws].retain(|&w| w != raw);
     }
-    focus(hwnd);
-    println!("finder: brought \"{t}\" to {device}");
+    land(hwnd);
+    println!("{who}: brought \"{t}\" to {device}");
+    save(&s);
+    Ok(())
+}
+
+/// To the front of the normal windows, restored if minimized, without taking focus.
+fn raise(h: HWND) {
+    unsafe {
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+        }
+        let _ = SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+/// Put a window on workspace `ws` of `device` without switching any screen (an overview
+/// drop, spec 0010 AC-7): on the shown workspace it comes to the front, otherwise it is
+/// hidden there, moved across screens while cloaked so it never flashes. On failure nothing
+/// about the window or the state has changed.
+pub fn place(hwnd: HWND, device: &str, ws: usize) -> Result<(), Miss> {
+    let count = settings::get().workspaces;
+    if ws >= count {
+        return Err(Miss::CantMove);
+    }
+    // Its own lock: show_on takes the state again.
+    if ws == active(device) {
+        return show_on(hwnd, device, false, "overview");
+    }
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return Err(Miss::Gone);
+    }
+    let mut s = state();
+    let raw = hwnd.0 as isize;
+    let t = title(hwnd);
+    let hidden = hidden_on(&s, raw);
+    if hidden.as_ref().is_some_and(|(dev, w)| dev == device && *w == ws) {
+        return Ok(());
+    }
+    let from = match &hidden {
+        Some((dev, _)) => dev.clone(),
+        None => device_name(unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) }),
+    };
+    let shell = Shell::new().map_err(|e| {
+        eprintln!("overview: shell unavailable: {e}");
+        Miss::CantMove
+    })?;
+    if hidden.is_none()
+        && let Err(e) = shell.hide(hwnd, true)
+    {
+        // The cloak can work and only the taskbar step fail: undo it, so nothing changes.
+        if cloaked(hwnd) != 0 {
+            let _ = shell.hide(hwnd, false);
+        }
+        eprintln!("overview: could not hide \"{t}\": {e}");
+        return Err(Miss::CantMove);
+    }
+    if from != device {
+        let moved = match (monitor_named(&from), monitor_named(device)) {
+            (Some(old), Some(new)) => move_to(hwnd, old, new).map_err(|e| format!("could not move \"{t}\": {e}")),
+            _ => Err(format!("{from} or {device} not found")),
+        };
+        if let Err(e) = moved {
+            if hidden.is_none() {
+                let _ = shell.hide(hwnd, false);
+            }
+            eprintln!("overview: {e}");
+            return Err(Miss::CantMove);
+        }
+    }
+    if let Some((dev, w)) = &hidden {
+        s.monitors.get_mut(dev).expect("found above").hidden[*w].retain(|&x| x != raw);
+    }
+    // Front = top, as a send puts it.
+    s.monitors.entry(device.to_string()).or_insert_with(Monitor::new).hidden[ws].insert(0, raw);
+    println!("overview: \"{t}\" -> {device} workspace {}/{count}, hidden", ws + 1);
     save(&s);
     Ok(())
 }

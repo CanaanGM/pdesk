@@ -53,6 +53,7 @@ pub struct Settings {
     pub restore_enabled: bool,
     pub restore_minutes: u32,
     pub overview_labels: Labels,
+    pub overview_live: bool, // false: the list is taken once, at open
 }
 
 impl Default for Settings {
@@ -78,6 +79,7 @@ impl Default for Settings {
             restore_enabled: true,
             restore_minutes: 3,
             overview_labels: Labels::Hover,
+            overview_live: true,
         }
     }
 }
@@ -118,13 +120,14 @@ minutes = 3                 # how long after start to keep matching (1 to 30)
 
 [overview]
 labels = "hover"            # "hover", "always" or "none"
+live = true                 # false: the list is taken when the overview opens
 "#;
 
 const TOP_KEYS: &[&str] = &["workspaces", "copilot_as_right_ctrl", "follow_activation", "shortcuts", "indicator", "restore", "overview"];
 const SHORTCUT_KEYS: &[&str] = &["previous", "next", "send_previous", "send_next", "send_previous_stay", "send_next_stay", "jump", "send_to", "send_to_stay", "finder", "overview"];
 const INDICATOR_KEYS: &[&str] = &["enabled", "hold_ms", "fade_ms"];
 const RESTORE_KEYS: &[&str] = &["enabled", "minutes"];
-const OVERVIEW_KEYS: &[&str] = &["labels"];
+const OVERVIEW_KEYS: &[&str] = &["labels", "live"];
 
 static SETTINGS: OnceLock<Settings> = OnceLock::new();
 // Kept apart from SETTINGS so an early get() can never block load() from filling it.
@@ -261,6 +264,7 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
     if let Some(t) = section(&top, "overview", &mut warn) {
         unknown_keys(t, "overview.", OVERVIEW_KEYS, &mut warn);
         s.overview_labels = choice(t, "labels", "overview.labels", LABELS, s.overview_labels, &mut warn);
+        s.overview_live = boolean(t, "live", "overview.live", s.overview_live, &mut warn);
     }
     (s, warn)
 }
@@ -477,8 +481,8 @@ impl fmt::Display for Settings {
         let list = |l: &[Combo]| l.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ");
         write!(
             f,
-            "workspaces={} copilot_as_right_ctrl={} follow_activation={} shortcuts.previous=[{}] shortcuts.next=[{}] shortcuts.send_previous=[{}] shortcuts.send_next=[{}] shortcuts.send_previous_stay=[{}] shortcuts.send_next_stay=[{}] shortcuts.jump={} shortcuts.send_to={} shortcuts.send_to_stay={} shortcuts.finder=[{}] shortcuts.overview=[{}] indicator.enabled={} indicator.hold_ms={} indicator.fade_ms={} restore.enabled={} restore.minutes={} overview.labels={}",
-            self.workspaces, self.copilot_as_right_ctrl, self.follow_activation, list(&self.previous), list(&self.next), list(&self.send_previous), list(&self.send_next), list(&self.send_previous_stay), list(&self.send_next_stay), mods_text(self.jump), mods_text(self.send_to), mods_text(self.send_to_stay), list(&self.finder), list(&self.overview), self.indicator_enabled, self.hold_ms, self.fade_ms, self.restore_enabled, self.restore_minutes, LABELS.iter().find(|(_, v)| *v == self.overview_labels).map_or("", |(w, _)| w)
+            "workspaces={} copilot_as_right_ctrl={} follow_activation={} shortcuts.previous=[{}] shortcuts.next=[{}] shortcuts.send_previous=[{}] shortcuts.send_next=[{}] shortcuts.send_previous_stay=[{}] shortcuts.send_next_stay=[{}] shortcuts.jump={} shortcuts.send_to={} shortcuts.send_to_stay={} shortcuts.finder=[{}] shortcuts.overview=[{}] indicator.enabled={} indicator.hold_ms={} indicator.fade_ms={} restore.enabled={} restore.minutes={} overview.labels={} overview.live={}",
+            self.workspaces, self.copilot_as_right_ctrl, self.follow_activation, list(&self.previous), list(&self.next), list(&self.send_previous), list(&self.send_next), list(&self.send_previous_stay), list(&self.send_next_stay), mods_text(self.jump), mods_text(self.send_to), mods_text(self.send_to_stay), list(&self.finder), list(&self.overview), self.indicator_enabled, self.hold_ms, self.fade_ms, self.restore_enabled, self.restore_minutes, LABELS.iter().find(|(_, v)| *v == self.overview_labels).map_or("", |(w, _)| w), self.overview_live
         )
     }
 }
@@ -514,6 +518,19 @@ mod tests {
         let (s, warn) = parse("workspaces = 6\n[overview]\nlabels = \"sometimes\"\n");
         assert_eq!((s.workspaces, s.overview_labels), (6, Labels::Hover));
         assert_eq!(warn, ["overview.labels: \"sometimes\" is not one of \"hover\", \"always\", \"none\", using default \"hover\""]);
+    }
+
+    // live = false is how you stop the spread moving as you aim (AC-10), so it must stick; a
+    // bad value costs only that key, back to live.
+    #[test]
+    fn a_bad_overview_live_only_resets_itself() {
+        let (s, warn) = parse("[overview]\nlive = false\n");
+        assert!(!s.overview_live);
+        assert!(warn.is_empty(), "{warn:?}");
+        let (s, warn) = parse("[overview]\nlabels = \"none\"\nlive = \"no\"\n");
+        assert_eq!((s.overview_labels, s.overview_live), (Labels::None, true));
+        assert_eq!(warn.len(), 1, "{warn:?}");
+        assert!(warn[0].starts_with("overview.live:"), "{warn:?}");
     }
 
     // minutes = 0 would end the restore before any app reopens; it must not also switch restore off.
