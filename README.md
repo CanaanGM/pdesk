@@ -143,3 +143,14 @@ Your settings and log stay in `%LOCALAPPDATA%\pdesk`; delete that folder too if 
 
 pdesk uses an undocumented part of Windows to hide windows. It works on Windows 11 25H2, but a
 big Windows update could change that.
+
+## License
+
+Copyright (C) 2026 CanaanGM
+
+pdesk is free software: you can redistribute it and/or modify it under the terms of the GNU
+General Public License as published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version. It comes with no warranty. See
+[LICENSE](LICENSE) for the full text.
+
+The third party agent skills in `.claude/skills/` keep their own authors' licenses.
