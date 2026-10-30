@@ -37,9 +37,27 @@ Build step 5 (drag and drop). One screen checks passed on your screen 2026-10-30
 - [x] After a drop, rerun `install.ps1` alone (its hard kill keeps `state.txt`; `--quit` shows every window and clears the layout on purpose) → the window is still on the workspace you dropped it on → AC-7
 - [ ] (whenever it turns up) A drop that fails → the note "Can't move this window" for about two seconds, the window stays put, and a log line says why → AC-7
 
+Build step 6 (live refresh). Built 2026-10-30, not tried yet.
+- [ ] With the overview open, start Character Map → it shows in the spread within about a quarter second, and the others move over → AC-10
+- [ ] With the overview open, close a spread window from outside (its taskbar entry, or a script) → it drops out and the spread rearranges → AC-10
+- [ ] Set `live = false` under `[overview]`, rerun `install.ps1`, open the overview, start Character Map → it does not show; close a window from outside → it drops out and the rest stay put → AC-10, AC-14
+- [ ] Leave the overview open and idle for a minute → it stays open (nothing closes it but you, a pdesk shortcut or a screen change) → AC-10, AC-12
+
+Build step 7 (animation). Built 2026-10-30, not tried yet. Set the style under `[overview]` in `settings.toml`, then rerun `install.ps1`.
+- [ ] `animation = "fade"`: Win+Tab → the overview fades in over about 250 ms, and the previews fade with the grey, never popping in at full strength → AC-11
+- [x] Fade: Esc → it fades out, and a click right away lands on the window beneath (passed on your screen 2026-10-30) → AC-11
+- [x] Fade: press an arrow or Tab during the fade in → the selection moves (passed on your screen 2026-10-30) → AC-11
+- [x] `animation = "fade"` is visible on your screen (2026-10-30, after the time went to 250 ms) → AC-11
+- [ ] `animation = "zoom"` (from an older file) → one `overview.animation:` log line, and the overview opens at once → AC-14
+- [x] Fade: Win+Tab twice fast (reopen during the fade out; passed on your screen 2026-10-30) → the old popups go at once and the new overview opens; nothing stays on screen after → AC-11
+- [ ] `animation = "off"` → opens and closes at once, as before → AC-11
+
 ## Commands
 - [x] `cargo test` → all pass (46 on 2026-10-30) → AC-2, AC-3, AC-7, AC-8, AC-14
 - [x] `install.ps1` → log shows `shortcuts.overview=[Win+Tab]`, `overview.labels=hover` and `pdesk running` → AC-1, AC-14
+- [x] `cargo test` → all pass (50 on 2026-10-30, including `a_bad_overview_animation_only_resets_itself` and `an_animation_eases_out_and_ends_exactly_in_place`) → AC-11, AC-14
+- [x] `install.ps1` → log shows `overview.animation=off overview.labels=hover overview.live=true` → AC-14
+- [ ] `live = "no"` or `animation = "slide"`, rerun `install.ps1` → one `overview.live:` or `overview.animation:` log line, that key back to its default, the rest kept → AC-14
 
 ## Value sourcing
 - [x] Open on three screens → each overview covers its own whole screen (`ws::screens()`) → AC-1
@@ -50,8 +68,10 @@ Build step 5 (drag and drop). One screen checks passed on your screen 2026-10-30
 - [ ] The selected screen is the one the mouse last moved over, not the one the overview opened on (`WM_MOUSEMOVE` on that popup) → AC-8
 - [ ] A drop lands on the tile under the mouse, or in a spread on the workspace that screen shows (`drop_target`, then `ws::active`) → AC-7
 - [ ] A drop across screens lands at the same relative place (`ws::place` through `ws::map_rect`) → AC-7
+- [ ] Live refresh: a window that opens shows up without reopening the overview (`ws::windows()` again every 250 ms) → AC-10
+- [ ] Animation: the style follows `settings.toml` after `install.ps1`, and the fade takes about a quarter second (fixed 250 ms) → AC-11
 
 ## Acceptance-criteria coverage
 - AC-1, AC-2, AC-3, AC-5, AC-6, AC-12, AC-13 covered by the step 2 and 3 checks · AC-4 card coded, not yet seen · AC-14 shortcut and `labels` only (`live`, `animation`: steps 6, 7)
 - AC-8, AC-9 by the step 4 checks (close paths passed) · AC-7 by the step 5 checks (not tried yet)
-- AC-10 (step 6), AC-11 (step 7): not built yet
+- AC-10 by the step 6 checks, AC-11 by the step 7 checks (both built, not tried yet) · AC-14 `live` and `animation` by the Commands checks

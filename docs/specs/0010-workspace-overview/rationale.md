@@ -17,7 +17,7 @@ Forces:
 One borderless popup per screen; `DwmRegisterThumbnail` draws each window live into it; pdesk paints the rest with GDI. Animation moves thumbnail rectangles on a timer.
 
 **Pros**: live, GPU drawn, a handful of documented calls; fits the indicator and finder code; works for minimized and cloaked windows.
-**Cons**: thumbnails always draw over the host's own painting, so the hover X and the drag ghost need their own small popups; animation is hand driven, so zoom may stutter.
+**Cons**: thumbnails always draw over the host's own painting, so the hover X and the drag ghost need their own small popups; animation is hand driven, on a timer.
 
 ### Option 2: DirectComposition visual tree
 Build the overview as composition visuals with real animations.
@@ -50,7 +50,8 @@ Calls I made (the runner up in brackets):
 - The overview covers each whole screen, taskbar included, so nothing peeks through [work area only, which leaves a live taskbar showing the workspace under the overview].
 - A drop keeps the overview open, so you can sort several windows in a row [close after each drop].
 - Fully live mode polls `ws::windows()` every 250 ms instead of hooking window events: one code path for both `live` values, and pdesk's foreground hook already shows that hooks reenter in awkward places (spec 0002) [`EVENT_OBJECT_SHOW` and `EVENT_OBJECT_DESTROY` hooks].
-- Animation durations are fixed (150 ms fade, 200 ms zoom), not settings, to keep the settings to what you asked to try [an `animation_ms` key].
+- The fade time is fixed at 250 ms (first 150 with a cubed ease out, raised on 2026-10-30 because you could not see it), not a setting, to keep the settings to what you asked to try [an `animation_ms` key].
+- Zoom is gone (2026-10-30). Built and tried, it felt weird to you: the windows swept too far from their real places, the closing flight looked odd, and it felt choppy. Fade alone is what you kept [zoom with shorter flights; a smoother zoom on a composition timer].
 - The thumbnails are not wrapped in a `cloak.rs` style layer: they are documented DWM calls, not raw vtables, so the AGENTS.md rule does not apply.
 
 Changed on 2026-10-29, after you tried build step 4:

@@ -102,7 +102,8 @@ you can change:
 - Every shortcut, or turn one off
 - The dots indicator: on or off, and how long it stays
 - Whether the Copilot key acts as `Right Ctrl`
-- The overview's window titles (`"hover"`, `"always"` or `"none"`) and whether it updates live
+- The overview's window titles (`"hover"`, `"always"` or `"none"`), whether it updates live,
+  and how it opens (`"off"` or `"fade"`)
 
 pdesk reads the file once at start, so after editing it run `install.ps1` again (or sign out
 and back in). If you type a bad value, only that one setting goes back to its default; the log

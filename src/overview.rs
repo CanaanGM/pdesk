@@ -4,6 +4,7 @@
 // background, the tiles and the text. Lives on the main thread; where a window lives only
 // ever changes through `ws`, and the overview never cloaks anything itself.
 use std::cell::{Cell, RefCell};
+use std::time::Instant;
 use windows::Win32::{
     Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
     Graphics::{
@@ -21,7 +22,7 @@ use windows::core::{BOOL, PCWSTR, w};
 
 use crate::finder::{self, BG, DIM, TEXT};
 use crate::indicator::ACCENT;
-use crate::settings::{self, Labels};
+use crate::settings::{self, Animation, Labels};
 use crate::ws::{self, Miss};
 
 const CLASS: PCWSTR = w!("pdesk-overview");
@@ -34,6 +35,9 @@ const NOTE_TIMER: usize = 2;
 const NOTE_MS: u32 = 2000;
 const REFRESH_TIMER: usize = 3;
 const REFRESH_MS: u32 = 250;
+const ANIM_TIMER: usize = 4;
+const FRAME_MS: u32 = 10; // Windows rounds it up to its own tick, about 16 ms
+const FADE_MS: u32 = 250;
 const KEY_W: VIRTUAL_KEY = VIRTUAL_KEY(b'W' as u16);
 
 // Sizes at 96 dpi, from the spec's layout.
@@ -60,6 +64,14 @@ struct Thumb(isize);
 impl Drop for Thumb {
     fn drop(&mut self) {
         unsafe { let _ = DwmUnregisterThumbnail(self.0); }
+    }
+}
+
+impl Thumb {
+    /// A fade frame: the preview made see through.
+    fn set_opacity(&self, opacity: u8) {
+        let p = DWM_THUMBNAIL_PROPERTIES { dwFlags: DWM_TNP_OPACITY, opacity, ..Default::default() };
+        unsafe { let _ = DwmUpdateThumbnailProperties(self.0, &p); }
     }
 }
 
@@ -175,6 +187,11 @@ impl Screen {
         self.slots.iter().map(|s| s.rect).collect()
     }
 
+    /// Every preview on this screen: the spread first, then the tiles' minis.
+    fn all(&self) -> impl Iterator<Item = &Slot> {
+        self.slots.iter().chain(self.tiles.iter().flat_map(|t| &t.minis))
+    }
+
     /// Where the hover X goes for `hwnd`, in screen coordinates. None when its window is
     /// too small to hold it.
     fn close_spot(&self, hwnd: HWND) -> Option<POINT> {
@@ -243,6 +260,15 @@ struct Session {
     closing: Vec<(HWND, String)>, // sent WM_CLOSE, waiting to go; titles for the log
     drag: Option<Drag>,
     seen: Vec<Seen>, // the list the layout was built from, for the refresh
+    fading_in: Option<Instant>, // when the fade in started, while it runs (AC-11)
+    alpha: u8, // the popups' now, so a close during the fade in fades out from there
+}
+
+/// The popups of a closed session while they fade out: no focus, and clicks go through them.
+struct Leaving {
+    screens: Vec<Screen>,
+    start: Instant,
+    from: u8, // the alpha the fade starts at
 }
 
 /// A listed window and where it lives, as the refresh compares them.
@@ -287,6 +313,7 @@ impl Session {
 thread_local! {
     static REGISTERED: Cell<bool> = const { Cell::new(false) };
     static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
+    static LEAVING: RefCell<Option<Leaving>> = const { RefCell::new(None) };
 }
 
 /// The strip: `count` tiles with the screen's aspect, 12% of its height, in a centered row
@@ -415,6 +442,16 @@ fn nearest(rects: &[RECT], from: usize, (dx, dy): (i32, i32)) -> Option<usize> {
         .map(|(_, i)| i)
 }
 
+/// Ease out: fast at first, then settling. 0 at the start, exactly 1 at the end. Squared,
+/// not cubed: a cube covers most of the way in the first frames and looks like no animation.
+fn ease(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(2)
+}
+
+fn progress(start: Instant) -> f32 {
+    ease((start.elapsed().as_secs_f32() * 1000.0 / FADE_MS as f32).min(1.0))
+}
+
 fn intersect(a: RECT, b: RECT) -> Option<RECT> {
     let r = RECT { left: a.left.max(b.left), top: a.top.max(b.top), right: a.right.min(b.right), bottom: a.bottom.min(b.bottom) };
     (r.left < r.right && r.top < r.bottom).then_some(r)
@@ -474,7 +511,7 @@ fn font(scale: f32) -> HFONT {
     }
 }
 
-fn popup(r: RECT) -> Option<HWND> {
+fn popup(r: RECT, layered: bool) -> Option<HWND> {
     unsafe {
         let inst = GetModuleHandleW(None).ok()?;
         if !REGISTERED.get() {
@@ -487,8 +524,14 @@ fn popup(r: RECT) -> Option<HWND> {
             REGISTERED.set(true);
         }
         // Tool window: never in Alt+Tab or the taskbar, and never in ws lists. One of them
-        // takes focus for the keys, so no WS_EX_NOACTIVATE.
-        CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, CLASS, w!("pdesk overview"), WS_POPUP, r.left, r.top, r.right - r.left, r.bottom - r.top, None, None, Some(inst.into()), None).ok()
+        // takes focus for the keys, so no WS_EX_NOACTIVATE. Layered only to animate, since
+        // it shows nothing until its alpha is set.
+        let ex = if layered { WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED } else { WS_EX_TOPMOST | WS_EX_TOOLWINDOW };
+        let h = CreateWindowExW(ex, CLASS, w!("pdesk overview"), WS_POPUP, r.left, r.top, r.right - r.left, r.bottom - r.top, None, None, Some(inst.into()), None).ok()?;
+        if layered {
+            let _ = SetLayeredWindowAttributes(h, COLORREF(0), 0, LWA_ALPHA);
+        }
+        Some(h)
     }
 }
 
@@ -535,6 +578,7 @@ pub fn toggle() {
 }
 
 fn open() {
+    drop(LEAVING.take());
     let fg = unsafe { GetForegroundWindow() };
     let root = unsafe { GetAncestor(fg, GA_ROOTOWNER) };
     let came_from = if root.is_invalid() { fg } else { root };
@@ -543,9 +587,10 @@ fn open() {
     // Numbered like the finder's screens: left to right, then top down.
     let mut order = ws::screens();
     order.sort_by_key(|(_, r)| (r.left, r.top));
+    let style = settings::get().overview_animation;
     let mut screens = Vec::new();
     for (device, rect) in order {
-        let Some(popup) = popup(rect) else {
+        let Some(popup) = popup(rect, style != Animation::Off) else {
             eprintln!("overview: popup for {device} not created");
             continue;
         };
@@ -569,13 +614,25 @@ fn open() {
     let selected = (start, sc.slots.iter().any(|s| s.hwnd == came_from).then_some(came_from).or_else(|| sc.first()));
     let windows: usize = screens.iter().map(|s| s.slots.len()).sum();
     let popups: Vec<HWND> = screens.iter().map(|s| s.popup).collect();
-    SESSION.set(Some(Session { screens, came_from, hover: None, selected, closing: Vec::new(), drag: None, seen: seen(&places) }));
+    let fading_in = (style == Animation::Fade).then(Instant::now);
+    let alpha = if fading_in.is_some() { 0 } else { 255 };
+    SESSION.set(Some(Session { screens, came_from, hover: None, selected, closing: Vec::new(), drag: None, seen: seen(&places), fading_in, alpha }));
+    // The first frame before anything shows.
+    let animating = SESSION.with_borrow_mut(|s| {
+        s.as_mut().is_some_and(|s| {
+            step(s);
+            s.fading_in.is_some()
+        })
+    });
     unsafe {
         for &p in &popups {
             let _ = SetWindowPos(p, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
         // One timer for every screen; it goes with its popup on close.
         SetTimer(Some(focus), REFRESH_TIMER, REFRESH_MS, None);
+        if animating {
+            SetTimer(Some(focus), ANIM_TIMER, FRAME_MS, None);
+        }
         let _ = SetForegroundWindow(focus);
         if GetForegroundWindow() != focus {
             close(false);
@@ -594,7 +651,82 @@ pub fn close(give_back: bool) {
         let to = if unsafe { IsWindow(Some(s.came_from)) }.as_bool() { s.came_from } else { unsafe { GetShellWindow() } };
         unsafe { let _ = SetForegroundWindow(to); }
     }
-    drop(s); // outside the borrow: destroying a popup sends it messages
+    leave(s); // outside the borrow: destroying a popup sends it messages
+}
+
+/// Off: every popup goes at once. Fade: they stay a moment, without focus and letting clicks
+/// through, while they fade out (AC-11).
+fn leave(s: Session) {
+    drop(LEAVING.take());
+    if settings::get().overview_animation == Animation::Off {
+        return drop(s);
+    }
+    let Session { screens, drag, alpha, .. } = s;
+    if drag.is_some() {
+        unsafe { let _ = ReleaseCapture(); }
+    }
+    drop(drag); // and its ghost
+    let Some(first) = screens.first().map(|sc| sc.popup) else { return };
+    for sc in &screens {
+        unsafe {
+            let _ = ShowWindow(sc.close_btn, SW_HIDE);
+            for id in [CLOSING_TIMER, NOTE_TIMER, REFRESH_TIMER, ANIM_TIMER] {
+                let _ = KillTimer(Some(sc.popup), id);
+            }
+            SetWindowLongPtrW(sc.popup, GWL_EXSTYLE, GetWindowLongPtrW(sc.popup, GWL_EXSTYLE) | WS_EX_TRANSPARENT.0 as isize);
+        }
+    }
+    LEAVING.set(Some(Leaving { screens, start: Instant::now(), from: alpha }));
+    unsafe { SetTimer(Some(first), ANIM_TIMER, FRAME_MS, None) };
+}
+
+/// The whole popup at `alpha`, previews too (Windows may not carry the popup's alpha over to
+/// the previews it draws into it).
+fn set_alpha(sc: &Screen, alpha: u8) {
+    unsafe { let _ = SetLayeredWindowAttributes(sc.popup, COLORREF(0), alpha, LWA_ALPHA); }
+    for t in sc.all().filter_map(|x| x.thumb.as_ref()) {
+        t.set_opacity(alpha);
+    }
+}
+
+/// One frame of the session's fade in; true when it just ended.
+fn step(s: &mut Session) -> bool {
+    let Some(start) = s.fading_in else { return false };
+    let e = progress(start);
+    s.alpha = (255.0 * e).round() as u8;
+    for sc in &s.screens {
+        set_alpha(sc, s.alpha);
+    }
+    let done = e >= 1.0;
+    if done {
+        s.fading_in = None;
+    }
+    done
+}
+
+/// The animation timer: a frame of the open session, or of the popups leaving.
+fn anim_tick(popup: HWND) {
+    if !is_ours(popup) {
+        return leaving_tick();
+    }
+    if SESSION.with_borrow_mut(|s| s.as_mut().is_some_and(step)) {
+        unsafe { let _ = KillTimer(Some(popup), ANIM_TIMER); }
+    }
+}
+
+fn leaving_tick() {
+    let done = LEAVING.with_borrow(|l| {
+        let Some(l) = l else { return true };
+        let e = progress(l.start);
+        let alpha = (l.from as f32 * (1.0 - e)).round() as u8;
+        for sc in &l.screens {
+            set_alpha(sc, alpha);
+        }
+        e >= 1.0
+    });
+    if done {
+        drop(LEAVING.take()); // outside the borrow: destroying a popup sends it messages
+    }
 }
 
 fn is_ours(hwnd: HWND) -> bool {
@@ -1158,13 +1290,21 @@ fn paint(hwnd: HWND) {
         let bg = CreateSolidBrush(BG);
         FillRect(mem, &rc, bg);
         let _ = DeleteObject(bg.into());
-        SESSION.with_borrow(|s| {
-            let Some(s) = s.as_ref() else { return };
-            if let Some(sc) = s.screens.iter().find(|sc| sc.popup == hwnd) {
-                let mine = |at: Option<(HWND, HWND)>| at.filter(|(p, _)| *p == hwnd).map(|(_, h)| h);
-                draw(mem, sc, mine(s.hover), mine(s.selection()));
-            }
+        let drawn = SESSION.with_borrow(|s| {
+            let Some(s) = s.as_ref() else { return false };
+            let Some(sc) = s.screens.iter().find(|sc| sc.popup == hwnd) else { return false };
+            let mine = |at: Option<(HWND, HWND)>| at.filter(|(p, _)| *p == hwnd).map(|(_, h)| h);
+            draw(mem, sc, mine(s.hover), mine(s.selection()));
+            true
         });
+        if !drawn {
+            // A popup fading out keeps its picture, without the marks.
+            LEAVING.with_borrow(|l| {
+                if let Some(sc) = l.iter().flat_map(|l| &l.screens).find(|sc| sc.popup == hwnd) {
+                    draw(mem, sc, None, None);
+                }
+            });
+        }
         let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, Some(mem), 0, 0, SRCCOPY);
         SelectObject(mem, old);
         let _ = DeleteObject(bmp.into());
@@ -1223,6 +1363,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_TIMER if wp.0 == REFRESH_TIMER => {
                 refresh();
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == ANIM_TIMER => {
+                anim_tick(hwnd);
                 LRESULT(0)
             }
             WM_DPICHANGED => LRESULT(0), // each popup is sized for its own screen at open
@@ -1418,6 +1562,14 @@ mod tests {
         assert_eq!(refresh_plan(false, &before, &moved), Refresh::Nothing, "the rest stay put");
         let went = [w(4, 0, true), w(3, 0, true)];
         assert_eq!(refresh_plan(false, &before, &went), Refresh::Drop(vec![h(1), h(2)]));
+    }
+
+    // The fade must end exactly at full strength, or the overview would stay a little see
+    // through for as long as it is open; and exactly at nothing on close (AC-11).
+    #[test]
+    fn a_fade_eases_out_and_ends_exactly_at_full_strength() {
+        assert_eq!((ease(0.0), ease(1.0)), (0.0, 1.0));
+        assert!(ease(0.5) > 0.5, "ease out covers most of the way early, then settles");
     }
 
     // AC-8: with no window you came from on that screen, the selection starts where you start

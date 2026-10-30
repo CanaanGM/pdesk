@@ -26,10 +26,10 @@ Win+Tab (or your touchpad swipe up, once you set it to Win+Tab) opens an overvie
 - **AC-8**: Keys: the arrows move the selection to the nearest window in that direction on the selected screen; Tab steps it through every spread window of the selected screen in reading order (rows top down, left to right within a row) and Shift+Tab steps back the same way, both wrapping around within that screen, never on to another screen (on a screen whose spread is empty they do nothing); the selected screen is the one under the mouse: the selection starts there (AC-1), and when the mouse moves onto another screen the selection moves with it, to that screen's first window; 1 to N switch the selected screen to that workspace and close the overview; Enter acts like a click on the selected window; Esc or Win+Tab closes the overview with focus back. The selected window has an accent border. The first selection is the window you came from when it is on that screen, else the first window there.
 - **AC-9**: Hovering a window in the spread shows an X on its top right corner. A click on the X, a middle click on the window, or Ctrl+W on the selected window asks it to close, as its own X button would. The overview stays open; the window drops out once it is gone. If the close cannot be sent, the note "Can't close this window" shows and the log says why.
 - **AC-10**: The `live` setting: `true` (default) adds windows that open, drops windows that close or hide, and rearranges the spread and tiles to match, within about a quarter second. `false` takes the list when the overview opens: windows that close or hide drop out and the rest stay put; new windows show the next time it opens.
-- **AC-11**: The `animation` setting: `"off"` (default) opens and closes at once. `"fade"` fades the whole overview in and out over about 150 ms. `"zoom"` grows each spread window from its real place into its slot on open, and on close sends the picked window back to its real place while the rest fade; with `live = true` a rearranged spread glides to its new slots. Any choice still answers clicks and keys during the animation.
+- **AC-11**: The `animation` setting: `"off"` (default) opens and closes at once. `"fade"` fades the whole overview in and out over about 250 ms. Any choice still answers clicks and keys during the animation.
 - **AC-12**: Any pdesk switch, jump, send or finder shortcut, or a screen change, while the overview is open closes it first (focus back), then runs as usual. Win+Tab while the finder is open closes the finder and opens the overview. The overview's windows never show in Alt+Tab or the taskbar, pdesk never hides them, and follow activation ignores them.
 - **AC-13**: The overview looks like the indicator and the finder: solid dark grey background, light text, the accent blue for the shown workspace and the selection, sharp at every screen's scaling.
-- **AC-14**: `settings.toml` `[shortcuts]` takes `overview`, a list like `finder`, default `["Win+Tab"]`, with the spec 0001 rules; a combo also in a switch, send or finder list turns `overview` off with a log line. A new `[overview]` table takes `animation` (`"off"`, `"fade"`, `"zoom"`; default `"off"`), `labels` (`"hover"`, `"always"`, `"none"`; default `"hover"`) and `live` (default `true`); a bad value resets just that key with a log line.
+- **AC-14**: `settings.toml` `[shortcuts]` takes `overview`, a list like `finder`, default `["Win+Tab"]`, with the spec 0001 rules; a combo also in a switch, send or finder list turns `overview` off with a log line. A new `[overview]` table takes `animation` (`"off"`, `"fade"`; default `"off"`), `labels` (`"hover"`, `"always"`, `"none"`; default `"hover"`) and `live` (default `true`); a bad value resets just that key with a log line.
 
 ## Decision
 
@@ -55,14 +55,14 @@ Reasoning and options: see [rationale.md](rationale.md).
 | `Mini` / `Slot` | `hwnd`, `thumb: isize` (`HTHUMBNAIL`, unregistered on drop), `rect: RECT` (destination), `real: RECT` (the window's real or restored rect, screen coordinates), `card: bool` (AC-4 fallback); a `Slot` also has `title: String`, `icon: HICON` (borrowed, never destroyed) | `overview.rs` | rebuilt on each layout |
 | `Drag` | `hwnd`, `from: (usize, Option<usize>)` (screen, workspace), `ghost: HWND` (small topmost popup with its own thumbnail), `start: POINT` | `overview.rs` | one drag |
 | `Hit` | `Slot(i)`, `Close(i)` (the hover X), `Mini(tile, i)`, `Tile(i)`, `Background` | `overview.rs` | per mouse move |
-| Settings | `overview: Vec<Combo>` default `[Win+Tab]`; `overview_animation: Animation` (`Off`, `Fade`, `Zoom`), `overview_labels: Labels` (`Hover`, `Always`, `None`), `overview_live: bool` | `settings.rs` | read once at start |
+| Settings | `overview: Vec<Combo>` default `[Win+Tab]`; `overview_animation: Animation` (`Off`, `Fade`), `overview_labels: Labels` (`Hover`, `Always`, `None`), `overview_live: bool` | `settings.rs` | read once at start |
 | `ws` additions | `pub fn active(device: &str) -> usize`; `pub fn show_workspace(device: &str, ws: usize)` (a switch on that screen, through `switch_to`); `pub fn place(hwnd, device: &str, ws: usize) -> Result<(), Miss>` (AC-7: `bring` when `ws` is the shown one, else cloak if needed, `move_to` while cloaked when the screen differs, and move it between `hidden` lists) | `ws.rs` | |
 
 `DEFAULT_FILE` gains `overview = ["Win+Tab"]` under `[shortcuts]` after `finder`, and:
 
 ```toml
 [overview]
-animation = "off"   # "off", "fade" or "zoom"
+animation = "off"   # "off" or "fade"
 labels = "hover"    # "hover", "always" or "none"
 live = true         # false: the list is taken when the overview opens
 ```
@@ -108,7 +108,7 @@ live = true         # false: the list is taken when the overview opens
 | Drop | target screen and workspace | cursor position hit tested against every screen's tiles, then spreads; the spread means `ws::active(device)` |
 | Drop | where the window lands | `ws::place` (relative place and size from `ws::map_rect`) |
 | Live refresh | the current list | `ws::windows()` again every 250 ms |
-| Animation | style, duration | `settings` `overview_animation`; fixed 150 ms fade and 200 ms zoom, ease out |
+| Animation | style, duration | `settings` `overview_animation`; fixed 250 ms fade, ease out (squared) |
 | Notes | text, how long | fixed strings in AC-7 and AC-9; 2 s |
 
 **Key invariants**:
@@ -135,7 +135,7 @@ live = true         # false: the list is taken when the overview opens
 4. Keys (arrows, Tab, digits, Enter) with the selection border, and closing windows (hover X popup, middle click, Ctrl+W), satisfies **AC-8**, **AC-9**
 5. Drag and drop across screens with the ghost popup, and `ws::place`, satisfies **AC-7**
 6. The 250 ms refresh and the `live` setting, satisfies **AC-10**, **AC-14**
-7. The `animation` setting: fade, then zoom, satisfies **AC-11**, **AC-14**
+7. The `animation` setting: fade (zoom was built too, then dropped on 2026-10-30), satisfies **AC-11**, **AC-14**
 8. Settings tests (defaults parse, bad values reset one key, conflicts), then try it on your screens and reinstall with `install.ps1`, satisfies all ACs
 
 ## Consequences
@@ -148,7 +148,6 @@ live = true         # false: the list is taken when the overview opens
 **Negative / tradeoffs**:
 - Win+Tab no longer opens Task View; you lose it unless you change the `overview` setting.
 - The biggest feature so far (one new file, about the finder's size or more), with three settings that each double some test paths.
-- Zoom animation moves dozens of thumbnail rectangles every frame; on a busy GPU it may stutter, which is why it is not the default.
 - In live mode the spread can move as you aim, by your choice; `live = false` is there for when it bothers you.
 
 **Neutral**:

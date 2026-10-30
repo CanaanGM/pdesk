@@ -30,6 +30,15 @@ pub enum Labels {
 
 const LABELS: &[(&str, Labels)] = &[("hover", Labels::Hover), ("always", Labels::Always), ("none", Labels::None)];
 
+/// How the overview opens and closes (spec 0010).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Animation {
+    Off,
+    Fade,
+}
+
+const ANIMATIONS: &[(&str, Animation)] = &[("off", Animation::Off), ("fade", Animation::Fade)];
+
 #[derive(PartialEq, Debug)]
 pub struct Settings {
     pub workspaces: usize,
@@ -52,6 +61,7 @@ pub struct Settings {
     pub fade_ms: u32,
     pub restore_enabled: bool,
     pub restore_minutes: u32,
+    pub overview_animation: Animation,
     pub overview_labels: Labels,
     pub overview_live: bool, // false: the list is taken once, at open
 }
@@ -78,6 +88,7 @@ impl Default for Settings {
             fade_ms: 200,
             restore_enabled: true,
             restore_minutes: 3,
+            overview_animation: Animation::Off,
             overview_labels: Labels::Hover,
             overview_live: true,
         }
@@ -119,6 +130,7 @@ enabled = true              # after a reboot or sign in, hide reopened windows b
 minutes = 3                 # how long after start to keep matching (1 to 30)
 
 [overview]
+animation = "off"           # "off" or "fade"
 labels = "hover"            # "hover", "always" or "none"
 live = true                 # false: the list is taken when the overview opens
 "#;
@@ -127,7 +139,7 @@ const TOP_KEYS: &[&str] = &["workspaces", "copilot_as_right_ctrl", "follow_activ
 const SHORTCUT_KEYS: &[&str] = &["previous", "next", "send_previous", "send_next", "send_previous_stay", "send_next_stay", "jump", "send_to", "send_to_stay", "finder", "overview"];
 const INDICATOR_KEYS: &[&str] = &["enabled", "hold_ms", "fade_ms"];
 const RESTORE_KEYS: &[&str] = &["enabled", "minutes"];
-const OVERVIEW_KEYS: &[&str] = &["labels", "live"];
+const OVERVIEW_KEYS: &[&str] = &["animation", "labels", "live"];
 
 static SETTINGS: OnceLock<Settings> = OnceLock::new();
 // Kept apart from SETTINGS so an early get() can never block load() from filling it.
@@ -263,6 +275,7 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
 
     if let Some(t) = section(&top, "overview", &mut warn) {
         unknown_keys(t, "overview.", OVERVIEW_KEYS, &mut warn);
+        s.overview_animation = choice(t, "animation", "overview.animation", ANIMATIONS, s.overview_animation, &mut warn);
         s.overview_labels = choice(t, "labels", "overview.labels", LABELS, s.overview_labels, &mut warn);
         s.overview_live = boolean(t, "live", "overview.live", s.overview_live, &mut warn);
     }
@@ -481,8 +494,8 @@ impl fmt::Display for Settings {
         let list = |l: &[Combo]| l.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ");
         write!(
             f,
-            "workspaces={} copilot_as_right_ctrl={} follow_activation={} shortcuts.previous=[{}] shortcuts.next=[{}] shortcuts.send_previous=[{}] shortcuts.send_next=[{}] shortcuts.send_previous_stay=[{}] shortcuts.send_next_stay=[{}] shortcuts.jump={} shortcuts.send_to={} shortcuts.send_to_stay={} shortcuts.finder=[{}] shortcuts.overview=[{}] indicator.enabled={} indicator.hold_ms={} indicator.fade_ms={} restore.enabled={} restore.minutes={} overview.labels={} overview.live={}",
-            self.workspaces, self.copilot_as_right_ctrl, self.follow_activation, list(&self.previous), list(&self.next), list(&self.send_previous), list(&self.send_next), list(&self.send_previous_stay), list(&self.send_next_stay), mods_text(self.jump), mods_text(self.send_to), mods_text(self.send_to_stay), list(&self.finder), list(&self.overview), self.indicator_enabled, self.hold_ms, self.fade_ms, self.restore_enabled, self.restore_minutes, LABELS.iter().find(|(_, v)| *v == self.overview_labels).map_or("", |(w, _)| w), self.overview_live
+            "workspaces={} copilot_as_right_ctrl={} follow_activation={} shortcuts.previous=[{}] shortcuts.next=[{}] shortcuts.send_previous=[{}] shortcuts.send_next=[{}] shortcuts.send_previous_stay=[{}] shortcuts.send_next_stay=[{}] shortcuts.jump={} shortcuts.send_to={} shortcuts.send_to_stay={} shortcuts.finder=[{}] shortcuts.overview=[{}] indicator.enabled={} indicator.hold_ms={} indicator.fade_ms={} restore.enabled={} restore.minutes={} overview.animation={} overview.labels={} overview.live={}",
+            self.workspaces, self.copilot_as_right_ctrl, self.follow_activation, list(&self.previous), list(&self.next), list(&self.send_previous), list(&self.send_next), list(&self.send_previous_stay), list(&self.send_next_stay), mods_text(self.jump), mods_text(self.send_to), mods_text(self.send_to_stay), list(&self.finder), list(&self.overview), self.indicator_enabled, self.hold_ms, self.fade_ms, self.restore_enabled, self.restore_minutes, ANIMATIONS.iter().find(|(_, v)| *v == self.overview_animation).map_or("", |(w, _)| w), LABELS.iter().find(|(_, v)| *v == self.overview_labels).map_or("", |(w, _)| w), self.overview_live
         )
     }
 }
@@ -531,6 +544,20 @@ mod tests {
         assert_eq!((s.overview_labels, s.overview_live), (Labels::None, true));
         assert_eq!(warn.len(), 1, "{warn:?}");
         assert!(warn[0].starts_with("overview.live:"), "{warn:?}");
+    }
+
+    // Off must stay the default (the overview opens at once unless you ask), a chosen style
+    // must stick, and a typo, or the "zoom" an older file may still hold, costs only the
+    // animation, never the keys next to it (AC-11, AC-14).
+    #[test]
+    fn a_bad_overview_animation_only_resets_itself() {
+        assert_eq!(parse("").0.overview_animation, Animation::Off);
+        let (s, warn) = parse("[overview]\nanimation = \"Fade\"\n");
+        assert_eq!(s.overview_animation, Animation::Fade);
+        assert!(warn.is_empty(), "{warn:?}");
+        let (s, warn) = parse("[overview]\nanimation = \"zoom\"\nlive = false\n");
+        assert_eq!((s.overview_animation, s.overview_live), (Animation::Off, false));
+        assert_eq!(warn, ["overview.animation: \"zoom\" is not one of \"off\", \"fade\", using default \"off\""]);
     }
 
     // minutes = 0 would end the restore before any app reopens; it must not also switch restore off.
