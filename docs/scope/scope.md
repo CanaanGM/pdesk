@@ -16,14 +16,14 @@ _These are recommendations to keep your build orderly, not requirements. Skip an
 | C | Copilot key as Right Ctrl | Existing | existing |
 | D | Taskbar follows the workspace | Existing | existing |
 | E | Workspace indicator | Existing | existing |
-| F | Autostart and install | Existing | in-progress |
+| F | Autostart and install | Existing | done |
 | G | Layout survives restarts and undocking | Existing | in-progress |
 | 1 | Coding standards and AGENTS.md | Foundation | done |
-| 2 | Settings file | Foundation | in-progress |
-| 3 | Follow activation | Slice 1 | in-progress |
+| 2 | Settings file | Foundation | done |
+| 3 | Follow activation | Slice 1 | done |
 | 4 | Send window to workspace | Slice 2 | done |
 | 5 | Send window to screen | Slice 2 | done |
-| 6 | Window finder | Slice 3 | in-progress |
+| 6 | Window finder | Slice 3 | done |
 | 7 | Alt+Tab per workspace | Slice 4 | done |
 | 8 | Tray icon | Slice 4 | done |
 | 9 | Workspace overview | Slice 5 | in-progress |
@@ -48,8 +48,8 @@ Hidden windows lose their taskbar button and get it back when shown. code in `sr
 ### E. Workspace indicator · existing
 A dots popup in the middle of the switched screen, DPI aware, fades out. A redesign is wanted later (see Deferred). code in `src/indicator.rs`
 
-### F. Autostart and install · in-progress
-Release build with no console, one copy at a time, log file, `--quit`, and `install.ps1` that registers start at login. Built; starting at login has not been seen working yet. code in `src/main.rs`, `install.ps1`
+### F. Autostart and install · done
+Release build with no console, one copy at a time, log file, `--quit`, and `install.ps1` that registers start at login. Starting at login confirmed by you (2026-10-30). code in `src/main.rs`, `install.ps1`
 
 ### G. Layout survives restarts and undocking · in-progress
 Saves each screen's workspace and every hidden window, and adopts them on start. Restart was confirmed working; showing a disconnected screen's hidden windows has not been tried yet. code in `src/ws.rs`
@@ -61,28 +61,28 @@ Capture how pdesk is built (raw COM vtable calls, the main thread vs hook thread
 **Done when:** a root `AGENTS.md` describes the modules, the threading rules, and the safety rules the code already follows.
 - [x] Capture conventions: `/audit`
 
-### 2. Settings file · in-progress
+### 2. Settings file · done
 One file for the shortcuts, the number of workspaces per screen, and indicator timing, so you can change them without rebuilding.
 **Done when:** changing the workspace count or a shortcut in the file takes effect after a restart, and a broken file falls back to defaults with a line in the log.
 spec [0001](../specs/0001-settings-file/index.md) · code in `src/settings.rs`
 - [x] Design it (spec): `/architect settings file`
-- [ ] Build it: `/develop settings file`
+- [x] Build it: `/develop settings file`
   - [x] Settings file loads and the workspace count works end to end (AC-1 to AC-4, AC-10 to AC-13)
   - [x] Indicator timing and the Copilot switch (AC-8, AC-9)
   - [x] Configurable shortcuts (AC-5 to AC-7)
-  - [ ] Tried on your screens, then installed (all ACs)
+  - [x] Tried on your screens, then installed (all ACs)
 
 ## Slice 1: Follow activation
 
-### 3. Follow activation · in-progress
+### 3. Follow activation · done
 When a hidden window comes to the front (an app reusing its window, a notification click, Alt+Tab), its screen jumps to that window's workspace, so nothing is ever active but invisible.
 **Done when:** opening a `.txt` file while Notepad sits on a hidden workspace switches that screen to it, and the indicator shows the jump. (Photos opens a new window per image on this machine, so it cannot show this.)
 spec [0002](../specs/0002-follow-activation/index.md) · code in `src/ws.rs`, `src/main.rs`, `src/settings.rs`
 - [x] Design it (spec): `/architect follow activation`
-- [ ] Build it: `/develop follow activation`
+- [x] Build it: `/develop follow activation`
   - [x] Jump on activation end to end: switch by index, foreground hook, lookup, focus, save (AC-1 to AC-6, AC-10, AC-11)
   - [x] Cooldown, bounce guard, and the `follow_activation` setting (AC-7 to AC-9)
-  - [ ] Tried on your screens, then installed (all ACs)
+  - [x] Tried on your screens, then installed (all ACs)
 
 ## Slice 2: Moving windows
 
@@ -117,16 +117,16 @@ spec [0005](../specs/0005-jump-send-by-number/index.md) · code in `src/ws.rs`, 
 
 ## Slice 3: Window finder
 
-### 6. Window finder · in-progress
+### 6. Window finder · done
 A search popup listing every window on every workspace and screen. Type a few letters, press Enter, and you land on it.
 **Done when:** the popup opens by shortcut, filters as you type, and Enter switches the right screen to the right workspace and focuses the window.
 spec [0007](../specs/0007-window-finder/index.md) · code in `src/finder.rs`, `src/ws.rs`, `src/keys.rs`, `src/settings.rs`, `src/main.rs`, `src/restore.rs`
 - [x] Design it (spec): `/architect window finder`
-- [ ] Build it: `/develop window finder`
+- [x] Build it: `/develop window finder`
   - [x] Open, list and go end to end: setting, Win+F, popup, Enter on hidden and visible windows, closing (AC-1, AC-2, AC-7, AC-8, AC-11, AC-14)
   - [x] Finding and rows: fuzzy ranking, recency, program names, icons, navigation keys, click, notes, final look (AC-3 to AC-6, AC-12, AC-13)
   - [x] Shift+Enter brings a window to you, Ctrl+W closes it (AC-9, AC-10)
-  - [ ] Tried on your screens, then installed (all ACs)
+  - [x] Tried on your screens, then installed (all ACs)
 
 ## Slice 4: Living with it
 

@@ -4,7 +4,7 @@
 // background, the tiles and the text. Lives on the main thread; where a window lives only
 // ever changes through `ws`, and the overview never cloaks anything itself.
 use std::cell::{Cell, RefCell};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows::Win32::{
     Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
     Graphics::{
@@ -31,6 +31,7 @@ const GHOST_CLASS: PCWSTR = w!("pdesk-overview-ghost");
 const TILE_BG: COLORREF = COLORREF(0x0034_3434); // the finder's line grey
 const CLOSING_TIMER: usize = 1;
 const CLOSING_POLL_MS: u32 = 200; // as the finder's
+const CLOSE_WAIT: Duration = Duration::from_secs(2); // still open after this (it asked to save, say): shown again
 const NOTE_TIMER: usize = 2;
 const NOTE_MS: u32 = 2000;
 const REFRESH_TIMER: usize = 3;
@@ -257,7 +258,7 @@ struct Session {
     came_from: HWND,
     hover: Option<(HWND, HWND)>, // (popup, window) of the spread window under the mouse
     selected: (usize, Option<HWND>), // (screen, spread window); no window when its spread is empty
-    closing: Vec<(HWND, String)>, // sent WM_CLOSE, waiting to go; titles for the log
+    closing: Vec<(HWND, String, Instant)>, // sent WM_CLOSE and out of the layout, waiting to go; titles for the log
     drag: Option<Drag>,
     seen: Vec<Seen>, // the list the layout was built from, for the refresh
     fading_in: Option<Instant>, // when the fade in started, while it runs (AC-11)
@@ -845,13 +846,15 @@ fn go(hwnd: HWND) {
 /// Every screen laid out again from the current window list, after windows moved or went:
 /// one may sit in a tile on one screen and in the spread on another.
 fn rebuild() {
-    let places = ws::windows();
+    let mut places = ws::windows();
     let (popups, old) = SESSION.with_borrow_mut(|s| {
         let Some(s) = s.as_mut() else { return (Vec::new(), None) };
+        // Seen with the closing windows, so the refresh does not take them for a change.
+        s.seen = seen(&places);
+        places.retain(|p| !s.closing.iter().any(|c| c.0 == p.hwnd));
         for sc in &mut s.screens {
             sc.build(&places);
         }
-        s.seen = seen(&places);
         s.fix_selection();
         (s.screens.iter().map(|sc| sc.popup).collect(), s.hover.take())
     });
@@ -881,8 +884,8 @@ fn refresh() {
     }
 }
 
-/// X, middle click, Ctrl+W: ask the window to close as its own X button would, then watch
-/// for it to go. The overview stays open.
+/// X, middle click, Ctrl+W: ask the window to close as its own X button would, take it out of
+/// the layout at once, then watch for it to go. The overview stays open.
 fn close_window(popup: HWND, h: HWND) {
     let title = ws::title(h);
     if !unsafe { IsWindow(Some(h)) }.as_bool() {
@@ -894,9 +897,12 @@ fn close_window(popup: HWND, h: HWND) {
             println!("overview: asked \"{title}\" to close");
             SESSION.with_borrow_mut(|s| {
                 if let Some(s) = s {
-                    s.closing.push((h, title));
+                    s.closing.push((h, title, Instant::now()));
                 }
             });
+            // Some apps (Store ones like Settings) shrink what they draw while closing, and
+            // the preview would stretch that to fill its slot.
+            drop_gone(&[h]);
             unsafe { SetTimer(Some(popup), CLOSING_TIMER, CLOSING_POLL_MS, None) };
         }
         Err(e) => {
@@ -906,21 +912,26 @@ fn close_window(popup: HWND, h: HWND) {
     }
 }
 
-/// Windows asked to close that closed or hid themselves (apps that close to the tray) drop out.
+/// Windows asked to close that closed or hid themselves (apps that close to the tray) are done;
+/// one still open after `CLOSE_WAIT` comes back into the layout.
 fn closing_tick(popup: HWND) {
-    let Some((gone, none_left)) = SESSION.with_borrow_mut(|s| {
+    let Some((gone, back, none_left)) = SESSION.with_borrow_mut(|s| {
         let s = s.as_mut()?;
-        let (gone, left): (Vec<_>, Vec<_>) = s.closing.drain(..).partition(|&(h, _)| unsafe { !IsWindow(Some(h)).as_bool() || !IsWindowVisible(h).as_bool() });
+        let (gone, left): (Vec<_>, Vec<_>) = s.closing.drain(..).partition(|&(h, ..)| unsafe { !IsWindow(Some(h)).as_bool() || !IsWindowVisible(h).as_bool() });
+        let (back, left): (Vec<_>, Vec<_>) = left.into_iter().partition(|(.., at)| at.elapsed() >= CLOSE_WAIT);
         s.closing = left;
-        Some((gone, s.closing.is_empty()))
+        Some((gone, back, s.closing.is_empty()))
     }) else {
         return;
     };
-    for (_, title) in &gone {
+    for (_, title, _) in &gone {
         println!("overview: closed \"{title}\"");
     }
-    if !gone.is_empty() {
-        drop_gone(&gone.iter().map(|&(h, _)| h).collect::<Vec<_>>());
+    for (_, title, _) in &back {
+        println!("overview: \"{title}\" is still open, showing it again");
+    }
+    if !back.is_empty() {
+        rebuild();
     }
     if none_left {
         unsafe { let _ = KillTimer(Some(popup), CLOSING_TIMER); }

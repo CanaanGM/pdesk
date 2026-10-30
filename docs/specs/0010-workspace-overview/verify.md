@@ -37,11 +37,13 @@ Build step 5 (drag and drop). One screen checks passed on your screen 2026-10-30
 - [x] After a drop, rerun `install.ps1` alone (its hard kill keeps `state.txt`; `--quit` shows every window and clears the layout on purpose) → the window is still on the workspace you dropped it on → AC-7
 - [ ] (whenever it turns up) A drop that fails → the note "Can't move this window" for about two seconds, the window stays put, and a log line says why → AC-7
 
-Build step 6 (live refresh). Built 2026-10-30, not tried yet.
-- [ ] With the overview open, start Character Map → it shows in the spread within about a quarter second, and the others move over → AC-10
-- [ ] With the overview open, close a spread window from outside (its taskbar entry, or a script) → it drops out and the spread rearranges → AC-10
-- [ ] Set `live = false` under `[overview]`, rerun `install.ps1`, open the overview, start Character Map → it does not show; close a window from outside → it drops out and the rest stay put → AC-10, AC-14
-- [ ] Leave the overview open and idle for a minute → it stays open (nothing closes it but you, a pdesk shortcut or a screen change) → AC-10, AC-12
+Build step 6 (live refresh). Passed on your screen 2026-10-30.
+- [x] With the overview open, start Character Map → it shows in the spread within about a quarter second, and the others move over → AC-10
+- [x] With the overview open, close a spread window from outside (its taskbar entry, or a script) → it drops out and the spread rearranges → AC-10
+- [x] Set `live = false` under `[overview]`, rerun `install.ps1`, open the overview, start Character Map → it does not show; close a window from outside → it drops out and the rest stay put → AC-10, AC-14
+- [x] Leave the overview open and idle for a minute → it stays open (nothing closes it but you, a pdesk shortcut or a screen change) → AC-10, AC-12
+- [ ] Close Settings (a Store app) from the overview → it leaves the spread at once, with no stretched picture first (fix 2026-10-30) → AC-9
+- [ ] Close an unsaved Notepad from the overview → it leaves, then comes back about 2 s later while it asks to save, and one `is still open` log line → AC-9
 
 Build step 7 (animation). Built 2026-10-30, not tried yet. Set the style under `[overview]` in `settings.toml`, then rerun `install.ps1`.
 - [ ] `animation = "fade"`: Win+Tab → the overview fades in over about 250 ms, and the previews fade with the grey, never popping in at full strength → AC-11

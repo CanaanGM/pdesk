@@ -52,6 +52,7 @@ Calls I made (the runner up in brackets):
 - Fully live mode polls `ws::windows()` every 250 ms instead of hooking window events: one code path for both `live` values, and pdesk's foreground hook already shows that hooks reenter in awkward places (spec 0002) [`EVENT_OBJECT_SHOW` and `EVENT_OBJECT_DESTROY` hooks].
 - The fade time is fixed at 250 ms (first 150 with a cubed ease out, raised on 2026-10-30 because you could not see it), not a setting, to keep the settings to what you asked to try [an `animation_ms` key].
 - Zoom is gone (2026-10-30). Built and tried, it felt weird to you: the windows swept too far from their real places, the closing flight looked odd, and it felt choppy. Fade alone is what you kept [zoom with shorter flights; a smoother zoom on a composition timer].
+- A window you close from the overview leaves the layout at once, and comes back if it is still open 2 s later (2026-10-30). Settings stretched into a blown up picture while it closed, since some Store apps shrink what they draw as they go [keep it until it goes, with its preview pinned to its old size].
 - The thumbnails are not wrapped in a `cloak.rs` style layer: they are documented DWM calls, not raw vtables, so the AGENTS.md rule does not apply.
 
 Changed on 2026-10-29, after you tried build step 4:

@@ -2,7 +2,7 @@
 
 **Date**: 2026-10-22
 **Updated**: 2026-10-28, settings moved to `%LOCALAPPDATA%\pdesk` by [spec 0008](../0008-run-pdesk-as-admin/index.md)
-**Status**: In Progress
+**Status**: Accepted
 
 ## Summary
 

@@ -1,7 +1,7 @@
 # 0007. Window finder: a search popup that lands you on any window, on any screen and workspace
 
 **Date**: 2026-10-28
-**Status**: In Progress
+**Status**: Accepted
 
 ## Summary
 

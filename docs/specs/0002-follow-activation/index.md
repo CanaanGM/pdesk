@@ -1,7 +1,7 @@
 # 0002. Follow activation: jump to a hidden window's workspace when it comes to the front
 
 **Date**: 2026-10-26
-**Status**: In Progress
+**Status**: Accepted
 
 ## Summary
 
