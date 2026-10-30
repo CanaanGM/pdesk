@@ -59,7 +59,17 @@ link: https://canaangm.github.io/pdesk/
 <section class="card">
   <p class="kicker">Steps</p>
   <h2>How do I install it?</h2>
-  <p>You build pdesk on your own PC, then one script installs it. You need three things:</p>
+  <p>The easy way needs nothing but Windows 11:</p>
+  <ol class="steps">
+    <li>Download the newest <code>pdesk-…-windows-x64.zip</code> from <a href="https://github.com/CanaanGM/pdesk/releases/latest">Releases</a>.</li>
+    <li>Unzip it. Open a terminal in the unzipped folder.</li>
+    <li>Run the install script:
+      <pre data-lang="powershell"><code>powershell -ExecutionPolicy Bypass -File install.ps1</code></pre></li>
+    <li>Say <strong>Yes</strong> to the UAC prompt. When the pdesk icon shows in the tray, pdesk is running.</li>
+  </ol>
+  <p>To update, do the same with the newer zip. Your workspaces are kept.</p>
+  <h3>Or build it yourself</h3>
+  <p>You build pdesk on your own PC, then the same script installs it. You need three things:</p>
   <div class="table-wrap"><table>
     <thead><tr><th>You need</th><th>Why</th><th>Where to get it</th></tr></thead>
     <tbody>

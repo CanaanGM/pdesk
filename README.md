@@ -10,18 +10,25 @@ Windows stay floating, just as they normally are. pdesk never tiles or rearrange
 hides and shows them.
 
 **There's a nicer version of this guide, with pictures: <https://canaangm.github.io/pdesk/>**
+## Install (the easy way)
 
-You need Git to download the code: `git clone https://github.com/CanaanGM/pdesk`.
+1. Download the newest `pdesk-…-windows-x64.zip` from
+   [Releases](https://github.com/CanaanGM/pdesk/releases/latest) and unzip it.
+2. Open a terminal in the unzipped folder and run:
 
-## What you need
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File install.ps1
+   ```
 
-- Windows 11
-- [Rust](https://rustup.rs) (pdesk is built from source on your machine)
-- Admin rights once, for the install prompt
+3. Say **Yes** to the admin prompt. A pdesk icon shows up in the tray.
 
-## Install
+To update, do the same with the newer zip. Your workspaces are kept.
 
-Open a **normal** terminal (not "Run as administrator") in this folder and run:
+## Build it yourself instead
+
+You need Windows 11, [Rust](https://rustup.rs) and Git. Get the code with
+`git clone https://github.com/CanaanGM/pdesk`, then open a **normal** terminal (not "Run as
+administrator") in that folder and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1

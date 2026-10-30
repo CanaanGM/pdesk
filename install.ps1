@@ -1,5 +1,6 @@
 # Build release pdesk as you, install it to Program Files, register the logon task that
 # starts it as admin, and (re)start it. Run again from a normal terminal after every change.
+# From a release zip (no Cargo.toml beside it) it installs the pdesk.exe beside it instead.
 # Admin so its keyboard hook still hears keys while an admin window has focus (spec 0008).
 #
 # The running copy is force-stopped ON PURPOSE: `pdesk --quit` would show every hidden
@@ -12,6 +13,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $dest = Join-Path $env:ProgramFiles 'pdesk'
 $exe = Join-Path $dest 'pdesk.exe'
+$fromSource = Test-Path (Join-Path $PSScriptRoot 'Cargo.toml')
+$src = if ($fromSource) { Join-Path $PSScriptRoot 'target\release\pdesk.exe' } else { Join-Path $PSScriptRoot 'pdesk.exe' }
 
 if ($Elevated) {
     function Say($msg) { Add-Content -LiteralPath $Log -Value $msg }
@@ -20,7 +23,9 @@ if ($Elevated) {
         Get-Process pdesk -ErrorAction SilentlyContinue | Stop-Process -Force -PassThru | Wait-Process
         Stop-ScheduledTask -TaskName pdesk -ErrorAction SilentlyContinue
         New-Item -ItemType Directory -Force $dest | Out-Null
-        Copy-Item (Join-Path $PSScriptRoot 'target\release\pdesk.exe') $exe -Force
+        Copy-Item $src $exe -Force
+        # A downloaded zip marks its files as from the internet; you chose to install this one.
+        Unblock-File $exe
 
         $task = @{
             TaskName  = 'pdesk'
@@ -49,12 +54,15 @@ if ($Elevated) {
     }
 }
 
-if ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'run install.ps1 from a normal terminal: the build must not be owned by Administrators'
+if ($fromSource) {
+    if ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'run install.ps1 from a normal terminal: the build must not be owned by Administrators'
+    }
+    cargo build --release --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml')
+    if ($LASTEXITCODE) { throw 'build failed' }
+} elseif (-not (Test-Path $src)) {
+    throw "no pdesk.exe next to install.ps1 ($src): unzip the whole release first"
 }
-
-cargo build --release --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml')
-if ($LASTEXITCODE) { throw 'build failed' }
 
 # Read now, never after elevating: an admin prompt answered by another account would change it.
 $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
